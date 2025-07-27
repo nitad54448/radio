@@ -209,7 +209,8 @@
                 stationList.innerHTML = '<li><p>Loading stations...</p></li>';
                 searchInput.value = '';
 
-                const apiUrl = `${apiServer}/json/stations/bycountrycodeexact/${countryCode}?hidebroken=true&order=clickcount&reverse=true&limit=500`;
+                // CORRECTED LINE: Added "&is_https=true" to filter for secure streams only
+                const apiUrl = `${apiServer}/json/stations/bycountrycodeexact/${countryCode}?hidebroken=true&is_https=true&order=clickcount&reverse=true&limit=500`;
 
                 const radioResponse = await fetch(apiUrl);
                 if (!radioResponse.ok) throw new Error(`Network response was not ok`);
