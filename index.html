@@ -64,6 +64,8 @@
 
     <div id="sidebar">
         <h2 id="sidebar-title">Stations in View</h2>
+        <input type="text" id="search-input" placeholder="Filter stations by name..." style="width: 95%; padding: 8px; margin-bottom: 15px; border: 1px solid #ccc; border-radius: 4px;">
+
         <div id="now-playing">Select a station to play.</div>
         <ul id="station-list">
             <li>Finding a radio server...</li>
@@ -75,15 +77,17 @@
     <audio id="audio-player" style="display:none;"></audio>
 
     <script>
-        const map = L.map('map').setView([48.85, 2.35], 6); // Start on Paris
+        const map = L.map('map').setView([48.85, 2.35], 6);
         const stationList = document.getElementById('station-list');
         const audioPlayer = document.getElementById('audio-player');
         const nowPlayingDiv = document.getElementById('now-playing');
         const sidebarTitle = document.getElementById('sidebar-title');
-        
+        const searchInput = document.getElementById('search-input');
+
         let currentPlayingLi = null;
         let apiServer = null;
-        let currentCountryCode = null; // NEW: Track the current country
+        let currentCountryCode = null;
+        let allStationsForCountry = [];
 
         L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
             maxZoom: 19,
@@ -101,6 +105,22 @@
             }
         }
 
+        function renderStationList(stations) {
+            stationList.innerHTML = '';
+            if (stations.length === 0) {
+                stationList.innerHTML = '<li>No matching stations found.</li>';
+            } else {
+                stations.forEach(station => {
+                    if (station.url_resolved) {
+                        const li = document.createElement('li');
+                        li.textContent = station.name;
+                        li.dataset.url = station.url_resolved;
+                        stationList.appendChild(li);
+                    }
+                });
+            }
+        }
+
         async function updateStations() {
             if (!apiServer) {
                 apiServer = await getApiServer();
@@ -109,13 +129,12 @@
                     return;
                 }
             }
-            
+
             const center = map.getCenter();
             const lat = center.lat;
             const lng = center.lng;
 
             try {
-                // 1. NEW: Get country code from coordinates using Nominatim API
                 const geoResponse = await fetch(`https://nominatim.openstreetmap.org/reverse?format=json&lat=${lat}&lon=${lng}&zoom=3`);
                 const geoData = await geoResponse.json();
                 const countryCode = geoData?.address?.country_code;
@@ -125,43 +144,56 @@
                     stationList.innerHTML = '<li>Move map to a country.</li>';
                     return;
                 }
-                
-                // 2. NEW: Only fetch stations if the country has changed
+
                 if (countryCode === currentCountryCode) {
-                    return; // Don't re-fetch if we are still in the same country
+                    return;
                 }
-                
-                currentCountryCode = countryCode; // Update the current country
+
+                currentCountryCode = countryCode;
                 sidebarTitle.textContent = `Stations in ${geoData.address.country}`;
                 stationList.innerHTML = '<li><p>Loading stations...</p></li>';
+                searchInput.value = '';
 
-                // 3. NEW: Fetch stations by exact country code for better accuracy
-                const apiUrl = `${apiServer}/json/stations/bycountrycodeexact/${countryCode}?hidebroken=true&order=clickcount&reverse=true`;
-                
+                const apiUrl = `${apiServer}/json/stations/bycountrycodeexact/${countryCode}?hidebroken=true&order=clickcount&reverse=true&limit=500`;
+
                 const radioResponse = await fetch(apiUrl);
                 if (!radioResponse.ok) throw new Error(`Network response was not ok`);
-                
-                const stations = await radioResponse.json();
-                
-                stationList.innerHTML = '';
 
-                if (stations.length === 0) {
-                    stationList.innerHTML = '<li>No stations found for this country.</li>';
-                } else {
-                    stations.forEach(station => {
-                        if (station.url_resolved) {
-                            const li = document.createElement('li');
-                            li.textContent = station.name;
-                            li.dataset.url = station.url_resolved;
-                            stationList.appendChild(li);
+                const stations = await radioResponse.json();
+
+                // ######################################################
+                // ## NEW LOGIC: De-duplicate the stations by stream URL ##
+                // ######################################################
+                const uniqueStationsMap = new Map();
+                stations.forEach(station => {
+                    if (station.url_resolved) {
+                        // If the map doesn't have this URL yet, add it.
+                        // This keeps the first entry found for each unique URL.
+                        if (!uniqueStationsMap.has(station.url_resolved)) {
+                            uniqueStationsMap.set(station.url_resolved, station);
                         }
-                    });
-                }
+                    }
+                });
+                const uniqueStations = Array.from(uniqueStationsMap.values());
+                // ######################################################
+                
+                allStationsForCountry = uniqueStations; // MODIFIED: Store the clean, unique list
+                renderStationList(allStationsForCountry);
+
             } catch (error) {
                 console.error("Failed to fetch stations:", error);
                 stationList.innerHTML = '<li>Could not load stations.</li>';
+                allStationsForCountry = [];
             }
         }
+
+        searchInput.addEventListener('input', () => {
+            const searchTerm = searchInput.value.toLowerCase();
+            const filteredStations = allStationsForCountry.filter(station => {
+                return station.name.toLowerCase().includes(searchTerm);
+            });
+            renderStationList(filteredStations);
+        });
 
         map.on('moveend', updateStations);
 
@@ -175,7 +207,7 @@
                     }
                     stationLi.classList.add('playing');
                     currentPlayingLi = stationLi;
-                    
+
                     audioPlayer.src = stationUrl;
                     audioPlayer.play();
                     nowPlayingDiv.textContent = `Now Playing: ${stationLi.textContent}`;
@@ -183,7 +215,6 @@
             }
         });
 
-        // Initial load
         updateStations();
     </script>
 </body>
