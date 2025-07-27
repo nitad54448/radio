@@ -18,7 +18,9 @@
             background-color: #f0f0f0;
         }
         #sidebar {
-            width: 30%;
+            width: 350px; /* Initial width for the sidebar */
+            min-width: 250px; /* Minimum width */
+            max-width: 70%; /* Maximum width */
             height: 100%;
             overflow-y: auto;
             background: #fff;
@@ -26,14 +28,30 @@
             box-sizing: border-box;
             box-shadow: 0 0 10px rgba(0,0,0,0.5);
             z-index: 1000;
+            display: flex;
+            flex-direction: column;
+        }
+        #resizer {
+            width: 8px;
+            height: 100%;
+            cursor: col-resize;
+            background: #f0f0f0;
+            z-index: 999;
+            border-left: 1px solid #ccc;
+            border-right: 1px solid #ccc;
         }
         #map {
             height: 100%;
-            width: 70%;
+            flex-grow: 1; /* The map will take up the remaining space */
         }
         #sidebar h2 {
             margin-top: 0;
             font-size: 1.2em;
+        }
+        #station-list-container {
+            flex-grow: 1;
+            overflow-y: auto;
+            margin-top: 15px;
         }
         #station-list {
             list-style-type: none;
@@ -45,6 +63,10 @@
             border-bottom: 1px solid #eee;
             cursor: pointer;
             transition: background-color 0.2s;
+            /* New styles for single-line display */
+            white-space: nowrap;
+            overflow: hidden;
+            text-overflow: ellipsis;
         }
         #station-list li:hover {
             background-color: #e6f7ff;
@@ -64,13 +86,16 @@
 
     <div id="sidebar">
         <h2 id="sidebar-title">Stations in View</h2>
-        <input type="text" id="search-input" placeholder="Filter stations by name..." style="width: 95%; padding: 8px; margin-bottom: 15px; border: 1px solid #ccc; border-radius: 4px;">
-
+        <input type="text" id="search-input" placeholder="Filter stations by name..." style="width: 95%; padding: 8px; border: 1px solid #ccc; border-radius: 4px;">
         <div id="now-playing">Select a station to play.</div>
-        <ul id="station-list">
-            <li>Finding a radio server...</li>
-        </ul>
+        <div id="station-list-container">
+            <ul id="station-list">
+                <li>Finding a radio server...</li>
+            </ul>
+        </div>
     </div>
+
+    <div id="resizer"></div>
 
     <div id="map"></div>
 
@@ -83,6 +108,9 @@
         const nowPlayingDiv = document.getElementById('now-playing');
         const sidebarTitle = document.getElementById('sidebar-title');
         const searchInput = document.getElementById('search-input');
+        const sidebar = document.getElementById('sidebar');
+        const resizer = document.getElementById('resizer');
+
 
         let currentPlayingLi = null;
         let apiServer = null;
@@ -93,6 +121,32 @@
             maxZoom: 19,
             attribution: '© OpenStreetMap contributors'
         }).addTo(map);
+
+        // --- Resizing Logic ---
+        let isResizing = false;
+
+        resizer.addEventListener('mousedown', (e) => {
+            isResizing = true;
+            document.addEventListener('mousemove', handleMouseMove);
+            document.addEventListener('mouseup', () => {
+                isResizing = false;
+                document.removeEventListener('mousemove', handleMouseMove);
+                // Invalidate map size to make it redraw correctly
+                map.invalidateSize();
+            });
+        });
+
+        function handleMouseMove(e) {
+            if (!isResizing) return;
+            const newSidebarWidth = e.clientX;
+            const minWidth = parseInt(getComputedStyle(sidebar).minWidth);
+            const maxWidth = window.innerWidth * 0.7; // Corresponds to max-width: 70%
+            
+            if (newSidebarWidth > minWidth && newSidebarWidth < maxWidth) {
+                sidebar.style.width = `${newSidebarWidth}px`;
+            }
+        }
+        // --- End of Resizing Logic ---
 
         async function getApiServer() {
             try {
@@ -114,6 +168,7 @@
                     if (station.url_resolved) {
                         const li = document.createElement('li');
                         li.textContent = station.name;
+                        li.title = station.name; // Add a tooltip to show the full name
                         li.dataset.url = station.url_resolved;
                         stationList.appendChild(li);
                     }
@@ -161,23 +216,17 @@
 
                 const stations = await radioResponse.json();
 
-                // ######################################################
-                // ## NEW LOGIC: De-duplicate the stations by stream URL ##
-                // ######################################################
                 const uniqueStationsMap = new Map();
                 stations.forEach(station => {
                     if (station.url_resolved) {
-                        // If the map doesn't have this URL yet, add it.
-                        // This keeps the first entry found for each unique URL.
                         if (!uniqueStationsMap.has(station.url_resolved)) {
                             uniqueStationsMap.set(station.url_resolved, station);
                         }
                     }
                 });
                 const uniqueStations = Array.from(uniqueStationsMap.values());
-                // ######################################################
                 
-                allStationsForCountry = uniqueStations; // MODIFIED: Store the clean, unique list
+                allStationsForCountry = uniqueStations;
                 renderStationList(allStationsForCountry);
 
             } catch (error) {
