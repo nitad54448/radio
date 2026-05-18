@@ -165,19 +165,17 @@
 <body>
 
     <div id="sidebar">
-        <h2 id="sidebar-title">Stations in View</h2>
-        <input type="text" id="search-input" placeholder="Filter stations by name..." style="width: 95%; padding: 8px; border: 1px solid #ccc; border-radius: 6px;">
+        <h2 id="sidebar-title">Radio Map</h2>
+        <input type="text" id="search-input" placeholder="Filter results by name..." style="width: 95%; padding: 8px; border: 1px solid #ccc; border-radius: 6px;">
         
         <div id="controls">
-            <button id="stop-button" class="control-button">Stop</button>
-            <input type="range" id="volume-control" min="0" max="100" value="50">
-            <span id="volume-display">50%</span>
+            <button id="search-button" class="control-button">Search this area</button>
         </div>
         
         <div id="now-playing">Select a station to play.</div>
         <div id="station-list-container">
             <ul id="station-list">
-                <li>Finding a radio server...</li>
+                <li>Move the map, then click "Search this area".</li>
             </ul>
         </div>
     </div>
@@ -197,14 +195,13 @@
         const searchInput = document.getElementById('search-input');
         const sidebar = document.getElementById('sidebar');
         const resizer = document.getElementById('resizer');
-        const stopButton = document.getElementById('stop-button');
-        const volumeControl = document.getElementById('volume-control');
-        const volumeDisplay = document.getElementById('volume-display');
+        const searchButton = document.getElementById('search-button');
 
         let currentPlayingLi = null;
         let apiServer = null;
-        let currentCountryCode = null;
-        let allStationsForCountry = [];
+
+        audioPlayer.volume = 0.7;
+        let allStationsInArea = [];
 
         L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
             maxZoom: 19,
@@ -292,26 +289,6 @@
                 // FIX: Use dedicated 'active' class instead of borrowing 'https' for colour.
                 statusSpan.className = 'stream-status active';
             }
-        });
-
-        // --- Volume control ---
-
-        volumeControl.addEventListener('input', (e) => {
-            audioPlayer.volume = e.target.value / 100;
-            volumeDisplay.textContent = `${e.target.value}%`;
-        });
-        audioPlayer.volume = 0.5;
-
-        // --- Stop button ---
-
-        stopButton.addEventListener('click', () => {
-            audioPlayer.pause();
-            audioPlayer.src = '';
-            audioPlayer.load();
-
-            resetLiState(currentPlayingLi); // FIX: reuses shared helper with full reset logic
-            currentPlayingLi = null;
-            nowPlayingDiv.textContent = 'Stopped. Select a station to play.';
         });
 
         // --- Retry ---
@@ -438,66 +415,59 @@
                 }
             }
 
-            const { lat, lng } = map.getCenter();
+            const bounds = map.getBounds();
+            const center = bounds.getCenter();
+            // FIX: Radius (km) = distance from center to the farthest visible corner.
+            // Leaflet returns metres, so divide by 1000.
+            const radiusKm = Math.max(
+                center.distanceTo(bounds.getNorthEast()),
+                center.distanceTo(bounds.getNorthWest())
+            ) / 1000;
+
+            sidebarTitle.textContent = 'Stations in view';
+            stationList.innerHTML = '<li>Loading stations...</li>';
+            searchInput.value = '';
 
             try {
-                // FIX: Nominatim blocks CORS from GitHub Pages and rate-limits hard (HTTP 429).
-                // BigDataCloud's client-side reverse-geocode endpoint allows CORS and needs no key.
-                const geoResponse = await fetch(
-                    `https://api.bigdatacloud.net/data/reverse-geocode-client?latitude=${lat}&longitude=${lng}&localityLanguage=en`
-                );
-                const geoData = await geoResponse.json();
-                const countryCode = geoData?.countryCode ? geoData.countryCode.toLowerCase() : null;
-                const countryName = geoData?.countryName || 'Unknown';
-
-                if (!countryCode) {
-                    sidebarTitle.textContent = "Unknown Area";
-                    stationList.innerHTML = '<li>Move map to a country.</li>';
-                    return;
-                }
-
-                if (countryCode === currentCountryCode) return;
-
-                currentCountryCode = countryCode;
-                sidebarTitle.textContent = `Stations in ${countryName}`;
-                stationList.innerHTML = '<li><p>Loading stations...</p></li>';
-                searchInput.value = '';
-
-                const apiUrl = `${apiServer}/json/stations/bycountrycodeexact/${countryCode}` +
-                               `?hidebroken=true&order=clickcount&reverse=true&limit=500`;
+                // Radio Browser supports geo radius search directly — no reverse-geocoding needed.
+                const apiUrl = `${apiServer}/json/stations/search` +
+                    `?geo_lat=${center.lat}&geo_long=${center.lng}&geo_distance=${Math.round(radiusKm * 1000)}` +
+                    `&hidebroken=true&order=clickcount&reverse=true&limit=500`;
 
                 const radioResponse = await fetch(apiUrl);
                 if (!radioResponse.ok) throw new Error(`Network response was not ok`);
 
                 const stations = await radioResponse.json();
 
-                // FIX: Deduplicate by name+url pair instead of name alone,
-                // so stations sharing a name but with different URLs are both kept.
+                // Filter strictly to map bounds (the geo_distance is a circle, not a rectangle)
+                // and dedupe by name+url.
                 const seen = new Set();
                 const uniqueStations = stations.filter(station => {
                     if (!station.url_resolved) return false;
+                    if (typeof station.geo_lat !== 'number' || typeof station.geo_long !== 'number') return false;
+                    if (!bounds.contains([station.geo_lat, station.geo_long])) return false;
                     const key = `${station.name}||${station.url_resolved}`;
                     if (seen.has(key)) return false;
                     seen.add(key);
                     return true;
                 });
 
-                allStationsForCountry = uniqueStations;
-                renderStationList(allStationsForCountry);
+                allStationsInArea = uniqueStations;
+                sidebarTitle.textContent = `${uniqueStations.length} stations in view`;
+                renderStationList(allStationsInArea);
 
             } catch (error) {
                 console.error("Failed to fetch stations:", error);
                 stationList.innerHTML = '<li>Could not load stations.</li>';
-                allStationsForCountry = [];
-                currentCountryCode = null;
+                allStationsInArea = [];
             }
         }
 
-        // --- Search ---
+        // --- Search filter ---
 
         searchInput.addEventListener('input', () => {
             const term = searchInput.value.toLowerCase();
-            const filtered = allStationsForCountry.filter(s =>
+            const filtered = allStationsInArea.filter(s =>
                 s.name.toLowerCase().includes(term)
             );
             renderStationList(filtered);
@@ -505,12 +475,7 @@
 
         // --- Map / list event wiring ---
 
-        // FIX: Debounce moveend so a single zoom/drag gesture fires only one fetch.
-        let moveTimer = null;
-        map.on('moveend', () => {
-            clearTimeout(moveTimer);
-            moveTimer = setTimeout(updateStations, 400);
-        });
+        searchButton.addEventListener('click', updateStations);
 
         stationList.addEventListener('click', (event) => {
             const li = event.target.closest('li');
@@ -519,7 +484,8 @@
             }
         });
 
-        updateStations();
+        // Pre-warm the API server lookup so the first Search click is instant.
+        getApiServer().then(srv => { apiServer = srv; });
     </script>
 </body>
 </html>
