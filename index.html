@@ -416,36 +416,80 @@
             }
 
             const bounds = map.getBounds();
-            const center = bounds.getCenter();
-            // FIX: Radius (km) = distance from center to the farthest visible corner.
-            // Leaflet returns metres, so divide by 1000.
-            const radiusKm = Math.max(
-                center.distanceTo(bounds.getNorthEast()),
-                center.distanceTo(bounds.getNorthWest())
-            ) / 1000;
-
-            sidebarTitle.textContent = 'Stations in view';
+            sidebarTitle.textContent = 'Searching...';
             stationList.innerHTML = '<li>Loading stations...</li>';
             searchInput.value = '';
 
             try {
-                // Radio Browser supports geo radius search directly — no reverse-geocoding needed.
-                const apiUrl = `${apiServer}/json/stations/search` +
-                    `?geo_lat=${center.lat}&geo_long=${center.lng}&geo_distance=${Math.round(radiusKm * 1000)}` +
-                    `&hidebroken=true&order=clickcount&reverse=true&limit=500`;
+                // Sample several points in the visible bounds and reverse-geocode each
+                // to find every country covered by the viewport. Radio Browser indexes
+                // stations by country code; very few have lat/long, so geo-radius
+                // search misses most of them.
+                const c = bounds.getCenter();
+                const ne = bounds.getNorthEast();
+                const sw = bounds.getSouthWest();
+                const nw = bounds.getNorthWest();
+                const se = bounds.getSouthEast();
+                const samplePoints = [
+                    c,
+                    ne, sw, nw, se,
+                    // mid-edges and quarter-points for big viewports
+                    L.latLng((ne.lat + c.lat) / 2, (ne.lng + c.lng) / 2),
+                    L.latLng((sw.lat + c.lat) / 2, (sw.lng + c.lng) / 2),
+                    L.latLng((nw.lat + c.lat) / 2, (nw.lng + c.lng) / 2),
+                    L.latLng((se.lat + c.lat) / 2, (se.lng + c.lng) / 2),
+                    L.latLng(c.lat, ne.lng), L.latLng(c.lat, sw.lng),
+                    L.latLng(ne.lat, c.lng), L.latLng(sw.lat, c.lng),
+                ];
 
-                const radioResponse = await fetch(apiUrl);
-                if (!radioResponse.ok) throw new Error(`Network response was not ok`);
+                const countryCodes = new Set();
+                const countryNames = [];
+                await Promise.all(samplePoints.map(async p => {
+                    try {
+                        const r = await fetch(
+                            `https://api.bigdatacloud.net/data/reverse-geocode-client?latitude=${p.lat}&longitude=${p.lng}&localityLanguage=en`
+                        );
+                        const g = await r.json();
+                        if (g?.countryCode) {
+                            const code = g.countryCode.toLowerCase();
+                            if (!countryCodes.has(code)) {
+                                countryCodes.add(code);
+                                countryNames.push(g.countryName || code.toUpperCase());
+                            }
+                        }
+                    } catch (_) { /* skip ocean / failed sample */ }
+                }));
 
-                const stations = await radioResponse.json();
+                if (countryCodes.size === 0) {
+                    sidebarTitle.textContent = 'No country in view';
+                    stationList.innerHTML = '<li>Move the map over land and try again.</li>';
+                    allStationsInArea = [];
+                    return;
+                }
 
-                // Filter strictly to map bounds (the geo_distance is a circle, not a rectangle)
-                // and dedupe by name+url.
+                // Fetch stations for each country, paginating past the 500-result page.
+                const allStations = [];
+                for (const code of countryCodes) {
+                    let offset = 0;
+                    const pageSize = 500;
+                    while (true) {
+                        const apiUrl = `${apiServer}/json/stations/bycountrycodeexact/${code}` +
+                            `?hidebroken=true&order=clickcount&reverse=true&limit=${pageSize}&offset=${offset}`;
+                        const resp = await fetch(apiUrl);
+                        if (!resp.ok) break;
+                        const page = await resp.json();
+                        if (!Array.isArray(page) || page.length === 0) break;
+                        allStations.push(...page);
+                        if (page.length < pageSize) break;
+                        offset += pageSize;
+                        if (offset >= 5000) break; // safety cap
+                    }
+                }
+
+                // Dedupe by name + url.
                 const seen = new Set();
-                const uniqueStations = stations.filter(station => {
+                const uniqueStations = allStations.filter(station => {
                     if (!station.url_resolved) return false;
-                    if (typeof station.geo_lat !== 'number' || typeof station.geo_long !== 'number') return false;
-                    if (!bounds.contains([station.geo_lat, station.geo_long])) return false;
                     const key = `${station.name}||${station.url_resolved}`;
                     if (seen.has(key)) return false;
                     seen.add(key);
@@ -453,7 +497,10 @@
                 });
 
                 allStationsInArea = uniqueStations;
-                sidebarTitle.textContent = `${uniqueStations.length} stations in view`;
+                const label = countryNames.length === 1
+                    ? countryNames[0]
+                    : `${countryNames.length} countries`;
+                sidebarTitle.textContent = `${uniqueStations.length} stations · ${label}`;
                 renderStationList(allStationsInArea);
 
             } catch (error) {
