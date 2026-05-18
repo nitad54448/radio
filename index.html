@@ -441,11 +441,14 @@
             const { lat, lng } = map.getCenter();
 
             try {
+                // FIX: Nominatim blocks CORS from GitHub Pages and rate-limits hard (HTTP 429).
+                // BigDataCloud's client-side reverse-geocode endpoint allows CORS and needs no key.
                 const geoResponse = await fetch(
-                    `https://nominatim.openstreetmap.org/reverse?format=json&lat=${lat}&lon=${lng}&zoom=3`
+                    `https://api.bigdatacloud.net/data/reverse-geocode-client?latitude=${lat}&longitude=${lng}&localityLanguage=en`
                 );
                 const geoData = await geoResponse.json();
-                const countryCode = geoData?.address?.country_code;
+                const countryCode = geoData?.countryCode ? geoData.countryCode.toLowerCase() : null;
+                const countryName = geoData?.countryName || 'Unknown';
 
                 if (!countryCode) {
                     sidebarTitle.textContent = "Unknown Area";
@@ -456,7 +459,7 @@
                 if (countryCode === currentCountryCode) return;
 
                 currentCountryCode = countryCode;
-                sidebarTitle.textContent = `Stations in ${geoData.address.country}`;
+                sidebarTitle.textContent = `Stations in ${countryName}`;
                 stationList.innerHTML = '<li><p>Loading stations...</p></li>';
                 searchInput.value = '';
 
@@ -502,7 +505,12 @@
 
         // --- Map / list event wiring ---
 
-        map.on('moveend', updateStations);
+        // FIX: Debounce moveend so a single zoom/drag gesture fires only one fetch.
+        let moveTimer = null;
+        map.on('moveend', () => {
+            clearTimeout(moveTimer);
+            moveTimer = setTimeout(updateStations, 400);
+        });
 
         stationList.addEventListener('click', (event) => {
             const li = event.target.closest('li');
