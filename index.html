@@ -116,7 +116,7 @@
         .stream-status.http    { color: #d73a49; }
         .stream-status.loading { color: #b08800; }
         .stream-status.error   { color: #d73a49; }
-        .stream-status.active  { color: #22863a; } /* dedicated "PLAYING" class */
+        .stream-status.active  { color: #22863a; }
         #now-playing {
             margin-top: 15px;
             padding: 10px;
@@ -125,27 +125,6 @@
             font-style: italic;
             color: #586069;
             min-height: 20px;
-        }
-        #controls {
-            margin-top: 15px;
-            display: flex;
-            gap: 10px;
-            align-items: center;
-        }
-        #volume-control {
-            flex-grow: 1;
-        }
-        .control-button {
-            padding: 8px 12px;
-            border: 1px solid #d1d5da;
-            background: #f6f8fa;
-            border-radius: 6px;
-            cursor: pointer;
-            font-weight: 600;
-            transition: background-color 0.2s;
-        }
-        .control-button:hover {
-            background: #e1e4e8;
         }
         .retry-button {
             font-size: 0.8em;
@@ -168,14 +147,10 @@
         <h2 id="sidebar-title">Radio Map</h2>
         <input type="text" id="search-input" placeholder="Filter results by name..." style="width: 95%; padding: 8px; border: 1px solid #ccc; border-radius: 6px;">
         
-        <div id="controls">
-            <button id="search-button" class="control-button">Search this area</button>
-        </div>
-        
         <div id="now-playing">Select a station to play.</div>
         <div id="station-list-container">
             <ul id="station-list">
-                <li>Move the map, then click "Search this area".</li>
+                <li>Loading initial stations...</li>
             </ul>
         </div>
     </div>
@@ -195,10 +170,11 @@
         const searchInput = document.getElementById('search-input');
         const sidebar = document.getElementById('sidebar');
         const resizer = document.getElementById('resizer');
-        const searchButton = document.getElementById('search-button');
 
         let currentPlayingLi = null;
         let apiServer = null;
+        let searchTimeout = null;
+        let currentAbortController = null;
 
         audioPlayer.volume = 0.7;
         let allStationsInArea = [];
@@ -210,10 +186,6 @@
 
         // --- Helpers ---
 
-        /**
-         * Returns the protocol label and CSS class for a given URL.
-         * FIX: Centralised so all callers (stop, reset, create) behave consistently.
-         */
         function getProtocolInfo(url) {
             if (!url) return { label: 'OTHER', cls: '' };
             if (url.startsWith('https://')) return { label: 'HTTPS', cls: 'https' };
@@ -221,12 +193,10 @@
             return { label: 'OTHER', cls: '' };
         }
 
-        /** Resets a station list item to its idle (pre-click) visual state. */
         function resetLiState(li) {
             if (!li) return;
             li.classList.remove('playing', 'loading', 'verified', 'error');
 
-            // FIX: Remove any stale retry button before resetting (stop path).
             const retryBtn = li.querySelector('.retry-button');
             if (retryBtn) retryBtn.remove();
 
@@ -234,7 +204,6 @@
             if (statusSpan) {
                 const { label, cls } = getProtocolInfo(li.dataset.url);
                 statusSpan.textContent = label;
-                // FIX: Always reset to correct protocol class (was missing 'OTHER' branch in stop handler).
                 statusSpan.className = 'stream-status' + (cls ? ' ' + cls : '');
             }
         }
@@ -255,7 +224,6 @@
 
             nowPlayingDiv.textContent = `Error playing: ${currentPlayingLi.title}`;
 
-            // FIX: Guard against duplicate retry buttons on repeated error events.
             if (!currentPlayingLi.querySelector('.retry-button')) {
                 const retryBtn = document.createElement('button');
                 retryBtn.textContent = 'Retry';
@@ -286,7 +254,6 @@
             const statusSpan = currentPlayingLi.querySelector('.stream-status');
             if (statusSpan) {
                 statusSpan.textContent = 'PLAYING';
-                // FIX: Use dedicated 'active' class instead of borrowing 'https' for colour.
                 statusSpan.className = 'stream-status active';
             }
         });
@@ -306,14 +273,12 @@
             const stationUrl = stationLi.dataset.url;
             if (!stationUrl) return;
 
-            // Reset the previously playing item if different.
             if (currentPlayingLi && currentPlayingLi !== stationLi) {
-                resetLiState(currentPlayingLi); // FIX: reuses shared helper
+                resetLiState(currentPlayingLi);
             }
 
             currentPlayingLi = stationLi;
 
-            // Clean up any previous error state on the item we're about to play.
             stationLi.classList.remove('error');
             const existingRetry = stationLi.querySelector('.retry-button');
             if (existingRetry) existingRetry.remove();
@@ -343,7 +308,6 @@
             }
         }
 
-        // FIX: Use a named handleMouseUp so it can be properly removed.
         function handleMouseUp() {
             isResizing = false;
             document.removeEventListener('mousemove', handleMouseMove);
@@ -378,7 +342,7 @@
             li.dataset.url = station.url_resolved;
 
             const statusSpan = document.createElement('span');
-            const { label, cls } = getProtocolInfo(station.url_resolved); // FIX: uses shared helper
+            const { label, cls } = getProtocolInfo(station.url_resolved);
             statusSpan.textContent = label;
             statusSpan.className = 'stream-status' + (cls ? ' ' + cls : '');
             li.appendChild(statusSpan);
@@ -407,6 +371,12 @@
         }
 
         async function updateStations() {
+            if (currentAbortController) {
+                currentAbortController.abort();
+            }
+            currentAbortController = new AbortController();
+            const { signal } = currentAbortController;
+
             if (!apiServer) {
                 apiServer = await getApiServer();
                 if (!apiServer) {
@@ -417,37 +387,35 @@
 
             const bounds = map.getBounds();
             sidebarTitle.textContent = 'Searching...';
-            stationList.innerHTML = '<li>Loading stations...</li>';
+            stationList.innerHTML = '<li>Finding countries...</li>';
             searchInput.value = '';
+            allStationsInArea = [];
 
             try {
-                // Sample several points in the visible bounds and reverse-geocode each
-                // to find every country covered by the viewport. Radio Browser indexes
-                // stations by country code; very few have lat/long, so geo-radius
-                // search misses most of them.
                 const c = bounds.getCenter();
                 const ne = bounds.getNorthEast();
                 const sw = bounds.getSouthWest();
                 const nw = bounds.getNorthWest();
                 const se = bounds.getSouthEast();
-                const samplePoints = [
-                    c,
-                    ne, sw, nw, se,
-                    // mid-edges and quarter-points for big viewports
-                    L.latLng((ne.lat + c.lat) / 2, (ne.lng + c.lng) / 2),
-                    L.latLng((sw.lat + c.lat) / 2, (sw.lng + c.lng) / 2),
-                    L.latLng((nw.lat + c.lat) / 2, (nw.lng + c.lng) / 2),
-                    L.latLng((se.lat + c.lat) / 2, (se.lng + c.lng) / 2),
-                    L.latLng(c.lat, ne.lng), L.latLng(c.lat, sw.lng),
-                    L.latLng(ne.lat, c.lng), L.latLng(sw.lat, c.lng),
-                ];
+
+                const GRID_SIZE = 6; // 6x6 = 36 points
+const samplePoints = [];
+const latStep = (ne.lat - sw.lat) / (GRID_SIZE - 1);
+const lngStep = (ne.lng - sw.lng) / (GRID_SIZE - 1);
+
+for (let i = 0; i < GRID_SIZE; i++) {
+    for (let j = 0; j < GRID_SIZE; j++) {
+        samplePoints.push(L.latLng(sw.lat + (i * latStep), sw.lng + (j * lngStep)));
+    }
+}
 
                 const countryCodes = new Set();
                 const countryNames = [];
                 await Promise.all(samplePoints.map(async p => {
                     try {
                         const r = await fetch(
-                            `https://api.bigdatacloud.net/data/reverse-geocode-client?latitude=${p.lat}&longitude=${p.lng}&localityLanguage=en`
+                            `https://api.bigdatacloud.net/data/reverse-geocode-client?latitude=${p.lat}&longitude=${p.lng}&localityLanguage=en`,
+                            { signal }
                         );
                         const g = await r.json();
                         if (g?.countryCode) {
@@ -457,56 +425,82 @@
                                 countryNames.push(g.countryName || code.toUpperCase());
                             }
                         }
-                    } catch (_) { /* skip ocean / failed sample */ }
+                    } catch (_) { /* skip ocean / aborted sample */ }
                 }));
 
                 if (countryCodes.size === 0) {
                     sidebarTitle.textContent = 'No country in view';
                     stationList.innerHTML = '<li>Move the map over land and try again.</li>';
-                    allStationsInArea = [];
                     return;
                 }
 
-                // Fetch stations for each country, paginating past the 500-result page.
-                const allStations = [];
+                stationList.innerHTML = '';
+                const seen = new Set();
+                const label = countryNames.length === 1 ? countryNames[0] : `${countryNames.length} countries`;
+                sidebarTitle.textContent = `Loading... · ${label}`;
+
                 for (const code of countryCodes) {
                     let offset = 0;
                     const pageSize = 500;
+                    
+                    for (const code of countryCodes) {
+                    let offset = 0;
+                    const pageSize = 500;
                     while (true) {
+                        if (signal.aborted) return;
+
                         const apiUrl = `${apiServer}/json/stations/bycountrycodeexact/${code}` +
                             `?hidebroken=true&order=clickcount&reverse=true&limit=${pageSize}&offset=${offset}`;
-                        const resp = await fetch(apiUrl);
-                        if (!resp.ok) break;
-                        const page = await resp.json();
-                        if (!Array.isArray(page) || page.length === 0) break;
-                        allStations.push(...page);
-                        if (page.length < pageSize) break;
-                        offset += pageSize;
-                        if (offset >= 5000) break; // safety cap
+                        
+                        try {
+                            const resp = await fetch(apiUrl, { signal });
+                            // If the server rate-limits or throws an error, stop gracefully
+                            if (!resp.ok) break; 
+                            
+                            const page = await resp.json();
+                            if (!Array.isArray(page) || page.length === 0) break;
+
+                            const newStations = page.filter(station => {
+                                if (!station.url_resolved) return false;
+                                const key = `${station.name}||${station.url_resolved}`;
+                                if (seen.has(key)) return false;
+                                seen.add(key);
+                                return true;
+                            });
+
+                            allStationsInArea.push(...newStations);
+
+                            newStations.forEach(station => {
+                                stationList.appendChild(createStationElement(station));
+                            });
+
+                            sidebarTitle.textContent = `${allStationsInArea.length} stations · ${label}`;
+
+                            if (page.length < pageSize) break;
+                            offset += pageSize;
+                            if (offset >= 3000) break; // Lowered safety cap slightly to prevent server blocking
+
+                            // 100ms delay to be gentle on the server during massive station loads
+                            await new Promise(r => setTimeout(r, 100)); 
+                        } catch (err) {
+                            if (err.name === 'AbortError') return;
+                            console.warn(`Stopped loading ${code} at offset ${offset} due to server limit.`);
+                            break; // Save and display whatever we successfully fetched so far!
+                        }
                     }
                 }
 
-                // Dedupe by name + url.
-                const seen = new Set();
-                const uniqueStations = allStations.filter(station => {
-                    if (!station.url_resolved) return false;
-                    const key = `${station.name}||${station.url_resolved}`;
-                    if (seen.has(key)) return false;
-                    seen.add(key);
-                    return true;
-                });
+                }
 
-                allStationsInArea = uniqueStations;
-                const label = countryNames.length === 1
-                    ? countryNames[0]
-                    : `${countryNames.length} countries`;
-                sidebarTitle.textContent = `${uniqueStations.length} stations · ${label}`;
-                renderStationList(allStationsInArea);
+                if (allStationsInArea.length === 0) {
+                    stationList.innerHTML = '<li>No matching stations found.</li>';
+                }
 
             } catch (error) {
-                console.error("Failed to fetch stations:", error);
-                stationList.innerHTML = '<li>Could not load stations.</li>';
-                allStationsInArea = [];
+                if (error.name !== 'AbortError') {
+                    console.error("Failed to fetch stations:", error);
+                    stationList.innerHTML = '<li>Could not load stations.</li>';
+                }
             }
         }
 
@@ -522,7 +516,10 @@
 
         // --- Map / list event wiring ---
 
-        searchButton.addEventListener('click', updateStations);
+        map.on('moveend', () => {
+            clearTimeout(searchTimeout);
+            searchTimeout = setTimeout(updateStations, 600);
+        });
 
         stationList.addEventListener('click', (event) => {
             const li = event.target.closest('li');
@@ -531,8 +528,11 @@
             }
         });
 
-        // Pre-warm the API server lookup so the first Search click is instant.
-        getApiServer().then(srv => { apiServer = srv; });
+        // Initialize server and trigger first search on load
+        getApiServer().then(srv => { 
+            apiServer = srv; 
+            updateStations();
+        });
     </script>
 </body>
 </html>
